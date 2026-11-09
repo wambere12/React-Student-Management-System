@@ -1,0 +1,6 @@
+{
+  "name": "EduManage - Multi-School Student Management System",
+  "description": "Multi-tenant student management system with PostgreSQL RLS school isolation, role-based administration, class management, and academic reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

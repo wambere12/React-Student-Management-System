@@ -1,0 +1,1586 @@
+Excellent! We are upgrading the project into a Multi-School Student Management System with a professional administrator dashboard.
+
+The important difference is that this version will support multiple schools on one platform. Each school administrator will only see and manage students belonging to their own school.
+Phase 2 – Multi-School Administration System
+
+
+
+
+
+
+
+
+schoollabs.cc
+
+
+Multi-school architecture
+React + Supabase
+PostgreSQL + RLS
+
+
+1. What we are building
+The application will have two administrator levels:
+
+Platform Super Administrator
+- Register and manage schools.
+- View all registered schools.
+- Create school administrator accounts.
+- Monitor overall platform statistics.
+School Administrator
+- Manage students in their school.
+- Register, edit and delete student records.
+- Manage classes and courses.
+- Search and filter students.
+- View school-specific reports.
+System architecture
+React.js Admin Dashboard
+
+Login · Students · Classes · Reports · Schools
+
+Supabase Authentication
+
+Identity and administrator roles
+
+PostgreSQL + Row Level Security
+
+School isolation and protected student records
+
+School A | School B | School C
+
+Independent student records
+
+
+2. Updated project structure
+We will organize the application like this:
+student-management-system/
+│
+├── public/
+│
+├── src/
+│   ├── components/
+│   │   ├── Sidebar.jsx
+│   │   ├── Navbar.jsx
+│   │   ├── StatCard.jsx
+│   │   ├── StudentForm.jsx
+│   │   └── ProtectedRoute.jsx
+│   │
+│   ├── layouts/
+│   │   └── AdminLayout.jsx
+│   │
+│   ├── pages/
+│   │   ├── Login.jsx
+│   │   ├── Dashboard.jsx
+│   │   ├── Students.jsx
+│   │   ├── Classes.jsx
+│   │   ├── Reports.jsx
+│   │   ├── Schools.jsx
+│   │   └── NotFound.jsx
+│   │
+│   ├── services/
+│   │   ├── supabase.js
+│   │   ├── authService.js
+│   │   └── studentService.js
+│   │
+│   ├── App.jsx
+│   ├── main.jsx
+│   └── index.css
+│
+├── .env
+├── .gitignore
+└── package.json
+
+
+3. Step 1 – Upgrade the database
+Open your Supabase Dashboard.
+
+Choose your project, open SQL Editor → New Query.
+
+Run this SQL to create the multi-school database structure.
+
+-- 1. Schools
+CREATE TABLE IF NOT EXISTS public.schools (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_name VARCHAR(200) NOT NULL,
+    school_code VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(150),
+    phone VARCHAR(30),
+    address TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. Administrator profiles
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name VARCHAR(150) NOT NULL,
+    school_id UUID REFERENCES public.schools(id),
+    role VARCHAR(30) NOT NULL
+        CHECK (role IN ('super_admin', 'school_admin')),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CHECK (
+        (role = 'super_admin' AND school_id IS NULL)
+        OR
+        (role = 'school_admin' AND school_id IS NOT NULL)
+    )
+);
+
+-- 3. School classes
+CREATE TABLE IF NOT EXISTS public.classes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id UUID NOT NULL REFERENCES public.schools(id)
+        ON DELETE CASCADE,
+    class_name VARCHAR(100) NOT NULL,
+    course VARCHAR(150),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (school_id, class_name)
+);
+
+-- 4. Update the existing students table
+ALTER TABLE public.students
+ADD COLUMN IF NOT EXISTS school_id UUID
+REFERENCES public.schools(id) ON DELETE CASCADE;
+
+ALTER TABLE public.students
+ADD COLUMN IF NOT EXISTS class_id UUID
+REFERENCES public.classes(id) ON DELETE SET NULL;
+
+ALTER TABLE public.students
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+
+-- 5. Indexes
+CREATE INDEX IF NOT EXISTS idx_students_school
+ON public.students(school_id);
+
+CREATE INDEX IF NOT EXISTS idx_students_class
+ON public.students(class_id);
+
+CREATE INDEX IF NOT EXISTS idx_profiles_school
+ON public.profiles(school_id);
+
+
+
+This database establishes three important relationships:
+- One school can have many administrators.
+- One school can have many classes.
+- One school can have many students.
+4. Step 2 – Configure database security
+This is one of the most important stages.
+
+We will use Row Level Security (RLS) so that School A cannot access School B's student records.
+
+Execute the following SQL after the previous script.
+
+-- Helper functions
+CREATE OR REPLACE FUNCTION public.is_super_admin()
+RETURNS BOOLEAN
+LANGUAGE SQL
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM public.profiles
+        WHERE id = (SELECT auth.uid())
+        AND role = 'super_admin'
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION public.my_school_id()
+RETURNS UUID
+LANGUAGE SQL
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT school_id
+    FROM public.profiles
+    WHERE id = (SELECT auth.uid())
+    AND role = 'school_admin';
+$$;
+
+-- Enable RLS
+ALTER TABLE public.schools ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.classes ENABLE ROW LEVEL SECURITY;
+
+-- Schools
+CREATE POLICY "Admins view their schools"
+ON public.schools FOR SELECT
+TO authenticated
+USING (
+    id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Super admin creates schools"
+ON public.schools FOR INSERT
+TO authenticated
+WITH CHECK (
+    (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Super admin updates schools"
+ON public.schools FOR UPDATE
+TO authenticated
+USING ((SELECT public.is_super_admin()))
+WITH CHECK ((SELECT public.is_super_admin()));
+
+CREATE POLICY "Super admin deletes schools"
+ON public.schools FOR DELETE
+TO authenticated
+USING ((SELECT public.is_super_admin()));
+
+-- Profiles
+CREATE POLICY "View permitted profiles"
+ON public.profiles FOR SELECT
+TO authenticated
+USING (
+    id = (SELECT auth.uid())
+    OR school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+-- Students
+CREATE POLICY "View school students"
+ON public.students FOR SELECT
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Register school students"
+ON public.students FOR INSERT
+TO authenticated
+WITH CHECK (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Update school students"
+ON public.students FOR UPDATE
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+)
+WITH CHECK (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Delete school students"
+ON public.students FOR DELETE
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+-- Classes
+CREATE POLICY "View school classes"
+ON public.classes FOR SELECT
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Create school classes"
+ON public.classes FOR INSERT
+TO authenticated
+WITH CHECK (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Update school classes"
+ON public.classes FOR UPDATE
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+)
+WITH CHECK (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+CREATE POLICY "Delete school classes"
+ON public.classes FOR DELETE
+TO authenticated
+USING (
+    school_id = (SELECT public.my_school_id())
+    OR (SELECT public.is_super_admin())
+);
+
+
+
+Important security setup:
+- Do not enable public registration for administrator accounts.
+- Create administrator accounts through a trusted administrative process.
+- Assign each administrator their school and role through a trusted database operation.
+- Never expose the Supabase service-role key in React.
+- Do not give ordinary school administrators permission to change their own role or school assignment.
+The RLS policies above protect student and class access. We will also keep administrator provisioning restricted to trusted operations.
+5. Step 3 – Configure React authentication
+Install the dependencies if you have not already:
+npm.cmd install react-router-dom @supabase/supabase-js lucide-react
+
+
+Create src/services/supabase.js:
+
+import { createClient } from "@supabase/supabase-js";
+
+export const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
+
+
+
+Create src/services/authService.js:
+
+import { supabase } from "./supabase";
+
+export async function loginAdmin(email, password) {
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password
+  });
+
+  if (error) throw error;
+
+  const { data: profile, error: profileError } = await supabase
+    .from("profiles")
+    .select("id, full_name, role, school_id")
+    .eq("id", data.user.id)
+    .single();
+
+  if (profileError || !profile) {
+    await supabase.auth.signOut();
+    throw new Error("Administrator profile not found.");
+  }
+
+  return { user: data.user, profile };
+}
+
+export async function logoutAdmin() {
+  const { error } = await supabase.auth.signOut();
+  if (error) throw error;
+}
+
+
+
+Create src/components/ProtectedRoute.jsx:
+
+import { Navigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { supabase } from "../services/supabase";
+
+export default function ProtectedRoute({ children }) {
+  const [checking, setChecking] = useState(true);
+  const [allowed, setAllowed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    async function verifyUser() {
+      const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) {
+        if (active) {
+          setAllowed(false);
+          setChecking(false);
+        }
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (active) {
+        setAllowed(Boolean(profile));
+        setChecking(false);
+      }
+    }
+
+    verifyUser();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (checking) return <p>Checking administrator access...</p>;
+
+  return allowed ? children : <Navigate to="/login" replace />;
+}
+
+
+
+This route checks that the user is authenticated and has an administrator profile. Database RLS remains the actual security boundary.
+6. Step 4 – Create the administrator login page
+Create src/pages/Login.jsx:
+
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { loginAdmin } from "../services/authService";
+
+export default function Login() {
+  const navigate = useNavigate();
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    try {
+      const result = await loginAdmin(email, password);
+
+      navigate(
+        result.profile.role === "super_admin"
+          ? "/schools"
+          : "/dashboard"
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main>
+      <h1>School Management System</h1>
+      <h2>Administrator Login</h2>
+
+      <form onSubmit={handleLogin}>
+        <input
+          type="email"
+          placeholder="Administrator email"
+          value={email}
+          onChange={e => setEmail(e.target.value)}
+          required
+        />
+
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          required
+        />
+
+        {error && <p role="alert">{error}</p>}
+
+        <button disabled={loading}>
+          {loading ? "Signing in..." : "Login"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
+
+
+7. Step 5 – Build the professional administrator dashboard
+
+
+
+
+
+
+
+
+ehubs.io
+
+
+Create src/layouts/AdminLayout.jsx:
+
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { logoutAdmin } from "../services/authService";
+
+export default function AdminLayout() {
+  const navigate = useNavigate();
+
+  async function handleLogout() {
+    await logoutAdmin();
+    navigate("/login");
+  }
+
+  return (
+    <div className="admin-layout">
+      <aside className="sidebar">
+        <h2>EduManage</h2>
+        <p className="sidebar-label">ADMINISTRATION</p>
+
+        <nav>
+          <NavLink to="/dashboard">Dashboard</NavLink>
+          <NavLink to="/students">Students</NavLink>
+          <NavLink to="/classes">Classes</NavLink>
+          <NavLink to="/reports">Reports</NavLink>
+          <NavLink to="/schools">Schools</NavLink>
+        </nav>
+
+        <button onClick={handleLogout}>Logout</button>
+      </aside>
+
+      <section className="main-area">
+        <header className="topbar">
+          <h3>School Administration</h3>
+          <span>Administrator</span>
+        </header>
+
+        <div className="page-content">
+          <Outlet />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+
+
+Create src/pages/Dashboard.jsx:
+
+import { useEffect, useState } from "react";
+import { supabase } from "../services/supabase";
+
+export default function Dashboard() {
+  const [stats, setStats] = useState({
+    students: 0,
+    classes: 0,
+    school: "Loading..."
+  });
+
+  useEffect(() => {
+    async function loadDashboard() {
+      const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) return;
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("school_id, role")
+        .eq("id", user.id)
+        .single();
+
+      if (!profile) return;
+
+      let studentQuery = supabase
+        .from("students")
+        .select("*", { count: "exact", head: true });
+
+      let classQuery = supabase
+        .from("classes")
+        .select("*", { count: "exact", head: true });
+
+      let schoolName = "All Schools";
+
+      if (profile.role === "school_admin") {
+        studentQuery = studentQuery.eq("school_id", profile.school_id);
+        classQuery = classQuery.eq("school_id", profile.school_id);
+
+        const { data: school } = await supabase
+          .from("schools")
+          .select("school_name")
+          .eq("id", profile.school_id)
+          .single();
+
+        schoolName = school?.school_name || "My School";
+      }
+
+      const [students, classes] = await Promise.all([
+        studentQuery,
+        classQuery
+      ]);
+
+      setStats({
+        students: students.count || 0,
+        classes: classes.count || 0,
+        school: schoolName
+      });
+    }
+
+    loadDashboard();
+  }, []);
+
+  return (
+    <div>
+      <h1>Dashboard</h1>
+      <p>Welcome to {stats.school}</p>
+
+      <div className="stats-grid">
+        <div className="stat-card">
+          <h3>Total Students</h3>
+          <h1>{stats.students}</h1>
+        </div>
+
+        <div className="stat-card">
+          <h3>Total Classes</h3>
+          <h1>{stats.classes}</h1>
+        </div>
+
+        <div className="stat-card">
+          <h3>School</h3>
+          <h2>{stats.school}</h2>
+        </div>
+      </div>
+
+      <section className="content-card">
+        <h2>System Overview</h2>
+        <p>
+          Manage your students, classes and academic records
+          from one central dashboard.
+        </p>
+      </section>
+    </div>
+  );
+}
+
+
+
+8. Step 6 – Build student management with update functionality
+Replace your previous src/pages/Students.jsx with this upgraded version.
+
+Create a service file src/services/studentService.js:
+
+import { supabase } from "./supabase";
+
+export async function getStudents() {
+  return await supabase
+    .from("students")
+    .select("*")
+    .order("created_at", { ascending: false });
+}
+
+export async function saveStudent(student, editingId) {
+  if (editingId) {
+    return await supabase
+      .from("students")
+      .update(student)
+      .eq("id", editingId);
+  }
+
+  return await supabase
+    .from("students")
+    .insert([student]);
+}
+
+export async function removeStudent(id) {
+  return await supabase
+    .from("students")
+    .delete()
+    .eq("id", id);
+}
+
+
+
+Create src/pages/Students.jsx:
+
+import { useEffect, useState } from "react";
+import { supabase } from "../services/supabase";
+import {
+  getStudents,
+  saveStudent,
+  removeStudent
+} from "../services/studentService";
+
+const emptyForm = {
+  student_id: "",
+  full_name: "",
+  email: "",
+  gender: "",
+  phone: "",
+  course: "",
+  class_name: ""
+};
+
+export default function Students() {
+  const [students, setStudents] = useState([]);
+  const [form, setForm] = useState(emptyForm);
+  const [search, setSearch] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function loadStudents() {
+    const { data, error } = await getStudents();
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setStudents(data || []);
+  }
+
+  useEffect(() => {
+    loadStudents();
+  }, []);
+
+  function handleChange(e) {
+    setForm({
+      ...form,
+      [e.target.name]: e.target.value
+    });
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
+
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (!user) {
+      setError("Please log in again.");
+      setLoading(false);
+      return;
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("school_id, role")
+      .eq("id", user.id)
+      .single();
+
+    if (profileError || !profile) {
+      setError("Administrator profile not found.");
+      setLoading(false);
+      return;
+    }
+
+    const studentData = { ...form };
+
+    if (!editingId) {
+      studentData.school_id =
+        profile.role === "school_admin"
+          ? profile.school_id
+          : null;
+    } else {
+      delete studentData.school_id;
+    }
+
+    const { error } = await saveStudent(studentData, editingId);
+
+    setLoading(false);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setForm(emptyForm);
+    setEditingId(null);
+    await loadStudents();
+  }
+
+  function editStudent(student) {
+    setEditingId(student.id);
+
+    setForm({
+      student_id: student.student_id || "",
+      full_name: student.full_name || "",
+      email: student.email || "",
+      gender: student.gender || "",
+      phone: student.phone || "",
+      course: student.course || "",
+      class_name: student.class_name || ""
+    });
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function deleteStudent(id) {
+    if (!window.confirm("Are you sure you want to delete this student?")) {
+      return;
+    }
+
+    const { error } = await removeStudent(id);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    await loadStudents();
+  }
+
+  const filtered = students.filter(student =>
+    `${student.full_name} ${student.student_id} ${student.course}`
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
+
+  return (
+    <div>
+      <h1>Student Management</h1>
+      <p>Register and manage school student records.</p>
+
+      <section className="content-card">
+        <h2>{editingId ? "Update Student" : "Register Student"}</h2>
+
+        <form onSubmit={handleSubmit} className="student-form">
+          <input
+            name="student_id"
+            placeholder="Student ID"
+            value={form.student_id}
+            onChange={handleChange}
+            required
+          />
+
+          <input
+            name="full_name"
+            placeholder="Full Name"
+            value={form.full_name}
+            onChange={handleChange}
+            required
+          />
+
+          <input
+            name="email"
+            type="email"
+            placeholder="Email"
+            value={form.email}
+            onChange={handleChange}
+          />
+
+          <select
+            name="gender"
+            value={form.gender}
+            onChange={handleChange}
+            required
+          >
+            <option value="">Select Gender</option>
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+          </select>
+
+          <input
+            name="phone"
+            placeholder="Phone"
+            value={form.phone}
+            onChange={handleChange}
+          />
+
+          <input
+            name="course"
+            placeholder="Course"
+            value={form.course}
+            onChange={handleChange}
+          />
+
+          <input
+            name="class_name"
+            placeholder="Class"
+            value={form.class_name}
+            onChange={handleChange}
+          />
+
+          <button disabled={loading}>
+            {loading ? "Saving..." :
+              editingId ? "Update Student" : "Register Student"}
+          </button>
+
+          {editingId && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingId(null);
+                setForm(emptyForm);
+              }}
+            >
+              Cancel
+            </button>
+          )}
+        </form>
+
+        {error && <p role="alert">{error}</p>}
+      </section>
+
+      <section className="content-card">
+        <h2>Student Records ({filtered.length})</h2>
+
+        <input
+          placeholder="Search by name, ID or course..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+
+        <div className="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Student ID</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Course</th>
+                <th>Class</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {filtered.map(student => (
+                <tr key={student.id}>
+                  <td>{student.student_id}</td>
+                  <td>{student.full_name}</td>
+                  <td>{student.email}</td>
+                  <td>{student.course}</td>
+                  <td>{student.class_name}</td>
+                  <td>
+                    <button onClick={() => editStudent(student)}>
+                      Edit
+                    </button>
+
+                    <button onClick={() => deleteStudent(student.id)}>
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan="6">No students found.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+
+
+Important: This version obtains school_id from the authenticated administrator's database profile, rather than trusting a school ID submitted by the browser. The database RLS policies enforce the school boundary.
+9. Step 7 – Add school management
+The platform administrator needs a way to register schools.
+
+Create src/pages/Schools.jsx:
+
+import { useEffect, useState } from "react";
+import { supabase } from "../services/supabase";
+
+export default function Schools() {
+  const [schools, setSchools] = useState([]);
+  const [form, setForm] = useState({
+    school_name: "",
+    school_code: "",
+    email: "",
+    phone: "",
+    address: ""
+  });
+  const [error, setError] = useState("");
+
+  async function loadSchools() {
+    const { data, error } = await supabase
+      .from("schools")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) setError(error.message);
+    else setSchools(data || []);
+  }
+
+  useEffect(() => {
+    loadSchools();
+  }, []);
+
+  async function createSchool(e) {
+    e.preventDefault();
+    setError("");
+
+    const { error } = await supabase
+      .from("schools")
+      .insert([form]);
+
+    if (error) {
+      setError(error.message);
+      return;
+    }
+
+    setForm({
+      school_name: "",
+      school_code: "",
+      email: "",
+      phone: "",
+      address: ""
+    });
+
+    loadSchools();
+  }
+
+  return (
+    <div>
+      <h1>School Management</h1>
+      <p>Register and manage participating schools.</p>
+
+      <section className="content-card">
+        <h2>Register School</h2>
+
+        <form onSubmit={createSchool} className="student-form">
+          <input
+            placeholder="School Name"
+            value={form.school_name}
+            onChange={e => setForm({
+              ...form,
+              school_name: e.target.value
+            })}
+            required
+          />
+
+          <input
+            placeholder="School Code"
+            value={form.school_code}
+            onChange={e => setForm({
+              ...form,
+              school_code: e.target.value.toUpperCase()
+            })}
+            required
+          />
+
+          <input
+            placeholder="School Email"
+            type="email"
+            value={form.email}
+            onChange={e => setForm({
+              ...form,
+              email: e.target.value
+            })}
+          />
+
+          <input
+            placeholder="Phone Number"
+            value={form.phone}
+            onChange={e => setForm({
+              ...form,
+              phone: e.target.value
+            })}
+          />
+
+          <input
+            placeholder="School Address"
+            value={form.address}
+            onChange={e => setForm({
+              ...form,
+              address: e.target.value
+            })}
+          />
+
+          <button type="submit">Register School</button>
+        </form>
+
+        {error && <p role="alert">{error}</p>}
+      </section>
+
+      <section className="content-card">
+        <h2>Registered Schools ({schools.length})</h2>
+
+        <table>
+          <thead>
+            <tr>
+              <th>School Name</th>
+              <th>School Code</th>
+              <th>Email</th>
+              <th>Phone</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {schools.map(school => (
+              <tr key={school.id}>
+                <td>{school.school_name}</td>
+                <td>{school.school_code}</td>
+                <td>{school.email}</td>
+                <td>{school.phone}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
+
+
+This page is intended for the super administrator. The database policies prevent ordinary school administrators from registering schools.
+10. Step 8 – Configure application routing
+Replace src/App.jsx:
+
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+
+import Login from "./pages/Login";
+import Dashboard from "./pages/Dashboard";
+import Students from "./pages/Students";
+import Schools from "./pages/Schools";
+import ProtectedRoute from "./components/ProtectedRoute";
+import AdminLayout from "./layouts/AdminLayout";
+
+import "./index.css";
+
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+
+        <Route element={
+          <ProtectedRoute>
+            <AdminLayout />
+          </ProtectedRoute>
+        }>
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/students" element={<Students />} />
+          <Route path="/schools" element={<Schools />} />
+        </Route>
+
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="*" element={<h1>404 - Page Not Found</h1>} />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+export default App;
+
+
+
+For production, add role-specific route guards so that only super_admin can open /schools. RLS already prevents unauthorized school creation even if someone manually visits that URL.
+11. Step 9 – Professional dashboard styling
+Create or replace src/index.css:
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f6fa;
+  color: #1e293b;
+}
+
+button, input, select {
+  font: inherit;
+}
+
+button {
+  background: #2563eb;
+  color: white;
+  padding: 11px 18px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  margin: 4px;
+}
+
+button:hover {
+  background: #1d4ed8;
+}
+
+input, select {
+  padding: 12px;
+  border: 1px solid #dbe1ea;
+  border-radius: 6px;
+  width: 100%;
+  margin: 6px 0;
+  background: white;
+}
+
+.admin-layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 245px;
+  background: #14213d;
+  color: white;
+  padding: 25px 18px;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sidebar h2 {
+  margin: 0 0 35px;
+}
+
+.sidebar-label {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sidebar nav a {
+  color: #dbeafe;
+  padding: 13px;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+.sidebar nav a.active,
+.sidebar nav a:hover {
+  background: #2563eb;
+  color: white;
+}
+
+.sidebar > button {
+  margin-top: auto;
+}
+
+.main-area {
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar {
+  height: 75px;
+  background: white;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 30px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.page-content {
+  padding: 30px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+  margin: 25px 0;
+}
+
+.stat-card,
+.content-card {
+  background: white;
+  padding: 23px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  margin-bottom: 22px;
+}
+
+.stat-card h1 {
+  color: #2563eb;
+}
+
+.student-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 18px;
+  background: white;
+}
+
+th, td {
+  padding: 14px;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+}
+
+th {
+  background: #f8fafc;
+}
+
+@media (max-width: 700px) {
+  .admin-layout {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+  }
+
+  .sidebar nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .student-form {
+    grid-template-columns: 1fr;
+  }
+
+  .page-content {
+    padding: 15px;
+  }
+}
+
+
+
+12. Step 10 – Create administrator accounts
+We need to connect each school administrator to their school.
+
+Use this secure provisioning procedure:
+1. Open Supabase → Authentication → Users.
+2. Invite or create the administrator's account.
+3. Copy the new user's UUID.
+4. Open SQL Editor.
+5. Assign the user to a school using the SQL below.
+First, register a school:
+INSERT INTO public.schools
+(school_name, school_code, email, address)
+VALUES
+('Kigali Digital Training Centre', 'KDTC001',
+ 'info@example.com', 'Kigali, Rwanda')
+RETURNING id;
+
+
+Copy the returned school UUID.
+
+Then create the administrator profile:
+INSERT INTO public.profiles
+(id, full_name, school_id, role)
+VALUES (
+    'PASTE_AUTH_USER_UUID_HERE',
+    'School Administrator',
+    'PASTE_SCHOOL_UUID_HERE',
+    'school_admin'
+);
+
+
+For your platform super administrator, create the Auth user first, then assign:
+INSERT INTO public.profiles
+(id, full_name, school_id, role)
+VALUES (
+    'PASTE_SUPER_ADMIN_AUTH_UUID_HERE',
+    'Platform Administrator',
+    NULL,
+    'super_admin'
+);
+
+
+These profile assignments should be performed by a trusted database administrator, not through a public registration form.
+13. Step 11 – Restrict dashboard pages by administrator role
+Update src/components/ProtectedRoute.jsx to include role checking:
+
+import { Navigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { supabase } from "../services/supabase";
+
+export default function ProtectedRoute({
+  children,
+  allowedRoles
+}) {
+  const [profile, setProfile] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+
+    async function verify() {
+      const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) {
+        if (active) setChecking(false);
+        return;
+      }
+
+      const { data } = await supabase
+        .from("profiles")
+        .select("role, school_id")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (active) {
+        setProfile(data || null);
+        setChecking(false);
+      }
+    }
+
+    verify();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (checking) return <p>Verifying access...</p>;
+
+  if (!profile) return <Navigate to="/login" replace />;
+
+  if (
+    allowedRoles &&
+    !allowedRoles.includes(profile.role)
+  ) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
+  return children;
+}
+
+
+
+Now protect the routes in App.jsx:
+<Route element={
+  <ProtectedRoute>
+    <AdminLayout />
+  </ProtectedRoute>
+}>
+  <Route
+    path="/dashboard"
+    element={<Dashboard />}
+  />
+
+  <Route
+    path="/students"
+    element={
+      <ProtectedRoute allowedRoles={["school_admin"]}>
+        <Students />
+      </ProtectedRoute>
+    }
+  />
+
+  <Route
+    path="/schools"
+    element={
+      <ProtectedRoute allowedRoles={["super_admin"]}>
+        <Schools />
+      </ProtectedRoute>
+    }
+  />
+</Route>
+
+
+This separates the two administrative experiences.
+14. Step 12 – Run and test the application
+In your VS Code terminal:
+npm.cmd run dev
+
+
+Open:
+
+Open Student Management System.
+Expected application screens
+
+
+
+
+
+
+
+
+
+
+1. Administrator Login
+
+Secure login for school and platform administrators.
+
+
+
+
+
+
+
+
+
+
+
+
+
+2. Dashboard
+
+Student counts, classes and school information.
+
+
+
+
+
+3. Student Management
+
+Registration, editing, searching and deletion.
+
+
+
+
+
+
+
+
+
+
+
+
+
+4. School Management
+
+Register and view schools as the platform administrator.
+
+
+
+15. Testing checklist
+Use these tests before deploying:
+System testing progress
+0/11 completed
+
+
+
+[ ] Create the first school.
+[ ] Create a platform super administrator.
+[ ] Create two school administrator accounts.
+[ ] Assign each administrator to a different school.
+[ ] Log in as School A administrator.
+[ ] Register students for School A.
+[ ] Log in as School B administrator.
+[ ] Verify School B cannot see School A students.
+[ ] Test editing and deleting student records.
+[ ] Log in as platform super administrator.
+[ ] Verify school registration is restricted to the super administrator.
+
+Important implementation notes
+- Existing students with school_id = NULL must be assigned to their correct school before school administrators can access them.
+- The student registration page is for school administrators; platform administrators should assign students to a selected school through a separate workflow.
+- The Classes and Reports pages are still to be implemented; their sidebar links should remain disabled or be hidden until those pages exist.
+- Remove any older permissive RLS policies that could allow cross-school access.
+- Test isolation using two separate administrator accounts before using real school records.
+16. Development status
+Feature	Status
+Multi-school database	Implemented
+School isolation policies	Initial implementation
+Admin login	Implemented
+Role-based route protection	Initial implementation
+School registration	Implemented
+Student CRUD	Implemented
+Dashboard statistics	Implemented
+Class management	Next phase
+Reports and exports	Next phase
+Administrator creation interface	Next phase
+Production security testing	Pending
+GitHub and Vercel deployment	Pending
+
+My recommendation is to complete the Classes, Reports, administrator provisioning and school-selection functionality before deploying this system for real schools.
+
+Your next development milestone: Build Phase 3 with complete class management, academic reports, downloadable student records (PDF/Excel), and a super-admin interface for creating school administrator accounts.
+💻Weekly student system development check-inTap to set up

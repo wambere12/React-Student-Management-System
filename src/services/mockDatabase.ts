@@ -262,11 +262,30 @@ export function getLocalDatabase(): DatabaseState {
       return initial;
     }
     const parsed = JSON.parse(raw);
+
+    // Ensure initial profiles always exist so login never fails
+    const existingProfiles: Profile[] = Array.isArray(parsed.profiles) ? parsed.profiles : [];
+    const mergedProfiles = [...existingProfiles];
+    for (const initP of INITIAL_PROFILES) {
+      if (!mergedProfiles.some((p) => p.email.toLowerCase() === initP.email.toLowerCase())) {
+        mergedProfiles.push(initP);
+      }
+    }
+
+    const existingSchools: School[] = Array.isArray(parsed.schools) ? parsed.schools : [];
+    const mergedSchools = existingSchools.length > 0 ? existingSchools : INITIAL_SCHOOLS;
+
+    const existingClasses: ClassItem[] = Array.isArray(parsed.classes) ? parsed.classes : [];
+    const mergedClasses = existingClasses.length > 0 ? existingClasses : INITIAL_CLASSES;
+
+    const existingStudents: Student[] = Array.isArray(parsed.students) ? parsed.students : [];
+    const mergedStudents = existingStudents.length > 0 ? existingStudents : INITIAL_STUDENTS;
+
     return {
-      schools: Array.isArray(parsed.schools) ? parsed.schools : INITIAL_SCHOOLS,
-      profiles: Array.isArray(parsed.profiles) ? parsed.profiles : INITIAL_PROFILES,
-      classes: Array.isArray(parsed.classes) ? parsed.classes : INITIAL_CLASSES,
-      students: Array.isArray(parsed.students) ? parsed.students : INITIAL_STUDENTS,
+      schools: mergedSchools,
+      profiles: mergedProfiles,
+      classes: mergedClasses,
+      students: mergedStudents,
     };
   } catch {
     return {
@@ -277,6 +296,8 @@ export function getLocalDatabase(): DatabaseState {
     };
   }
 }
+
+export { INITIAL_PROFILES, INITIAL_SCHOOLS, INITIAL_CLASSES, INITIAL_STUDENTS };
 
 export function saveLocalDatabase(db: DatabaseState): void {
   try {

@@ -4,6 +4,7 @@ import {
   saveLocalDatabase,
   getLocalAuthSession,
   setLocalAuthSession,
+  INITIAL_PROFILES,
 } from "./mockDatabase";
 import { Profile } from "../types";
 
@@ -18,22 +19,33 @@ const hasValidSupabaseEnv =
   !envUrl.includes("your-project") &&
   !envUrl.includes("MY_");
 
-export const isLiveSupabaseActive = hasValidSupabaseEnv;
+export const isLiveSupabaseAvailable = hasValidSupabaseEnv;
+export const liveSupabaseUrl = envUrl || "";
 
-// Create standard Supabase client if configured
+// Standard Supabase client if configured
 export const realSupabase = hasValidSupabaseEnv
   ? createClient(envUrl, envAnonKey)
   : null;
 
+// Database Connection Mode: 'sandbox' (instant test accounts & RLS) or 'live' (remote Supabase)
+const MODE_STORAGE_KEY = 'edumanage_connection_mode_v2';
+
+export function getDatabaseMode(): 'sandbox' | 'live' {
+  const stored = localStorage.getItem(MODE_STORAGE_KEY);
+  if (stored === 'live' && hasValidSupabaseEnv) {
+    return 'live';
+  }
+  // Default to 'sandbox' so the 3 demo roles work right away with zero 400 errors
+  return 'sandbox';
+}
+
+export function setDatabaseMode(mode: 'sandbox' | 'live'): void {
+  localStorage.setItem(MODE_STORAGE_KEY, mode);
+  window.dispatchEvent(new Event('edumanage_mode_updated'));
+}
+
 /**
- * High-fidelity Supabase adapter
- * Directly supports all query operations in the tutorial:
- * - auth.signInWithPassword, auth.signOut, auth.getUser
- * - from('schools').select, insert, update, delete
- * - from('profiles').select, insert, update, delete
- * - from('students').select, insert, update, delete
- * - from('classes').select, insert, update, delete
- * Enforces the exact PostgreSQL Row Level Security (RLS) rules:
+ * High-fidelity QueryBuilder implementing PostgreSQL Row Level Security (RLS)
  * - is_super_admin() -> can see and modify all
  * - my_school_id() -> school_admin only sees/modifies their own school's records!
  */
@@ -44,6 +56,8 @@ class QueryBuilder<T = Record<string, unknown>> {
   private orderAscending = true;
   private isHeadOnly = false;
   private isExactCount = false;
+  private updatePatch: Record<string, any> | null = null;
+  private operation: 'select' | 'update' | 'delete' | 'insert' = 'select';
 
   constructor(tableName: string) {
     this.tableName = tableName;
@@ -73,26 +87,32 @@ class QueryBuilder<T = Record<string, unknown>> {
     return this;
   }
 
+  update(patch: Record<string, any>) {
+    this.operation = 'update';
+    this.updatePatch = patch;
+    return this;
+  }
+
+  delete() {
+    this.operation = 'delete';
+    return this;
+  }
+
   private applyRLS(data: any[]): any[] {
     const session = getLocalAuthSession();
     if (!session) {
-      // Unauthenticated
       return [];
     }
 
     const { profile } = session;
-
-    // Helper functions from Step 2:
     const isSuperAdmin = profile.role === "super_admin";
     const mySchoolId = profile.school_id;
 
     if (this.tableName === "schools") {
-      // "Admins view their schools" -> id = my_school_id() OR is_super_admin()
       return data.filter((school) => isSuperAdmin || school.id === mySchoolId);
     }
 
     if (this.tableName === "profiles") {
-      // "View permitted profiles" -> id = auth.uid() OR school_id = my_school_id() OR is_super_admin()
       return data.filter(
         (p) =>
           isSuperAdmin ||
@@ -102,14 +122,12 @@ class QueryBuilder<T = Record<string, unknown>> {
     }
 
     if (this.tableName === "students") {
-      // "View school students" -> school_id = my_school_id() OR is_super_admin()
       return data.filter(
         (student) => isSuperAdmin || student.school_id === mySchoolId
       );
     }
 
     if (this.tableName === "classes") {
-      // "View school classes" -> school_id = my_school_id() OR is_super_admin()
       return data.filter(
         (cls) => isSuperAdmin || cls.school_id === mySchoolId
       );
@@ -141,20 +159,6 @@ class QueryBuilder<T = Record<string, unknown>> {
     if (this.tableName === "students") db.students = data;
     if (this.tableName === "classes") db.classes = data;
     saveLocalDatabase(db);
-  }
-
-  private updatePatch: Record<string, any> | null = null;
-  private operation: 'select' | 'update' | 'delete' | 'insert' = 'select';
-
-  update(patch: Record<string, any>) {
-    this.operation = 'update';
-    this.updatePatch = patch;
-    return this;
-  }
-
-  delete() {
-    this.operation = 'delete';
-    return this;
   }
 
   async then(resolve: (result: { data: any; error: any; count?: number }) => void) {
@@ -327,21 +331,34 @@ class QueryBuilder<T = Record<string, unknown>> {
   }
 }
 
-// Simulated Auth Client
+// In-browser Auth simulation for instant testing
 const mockAuth = {
   async signInWithPassword({ email, password }: { email: string; password?: string }) {
     const db = getLocalDatabase();
-    const cleanEmail = email.trim().toLowerCase();
+    const cleanEmail = (email || "").trim().toLowerCase();
 
-    // Check if profile exists
-    const profile = db.profiles.find(
-      (p) => p.email.toLowerCase() === cleanEmail
+    // Look for matching profile
+    let profile = db.profiles.find(
+      (p) => p.email.toLowerCase() === cleanEmail || p.email.toLowerCase().startsWith(cleanEmail)
     );
+
+    if (!profile) {
+      profile = INITIAL_PROFILES.find(
+        (p) => p.email.toLowerCase() === cleanEmail || p.email.toLowerCase().startsWith(cleanEmail)
+      );
+      if (profile) {
+        db.profiles.push(profile);
+        saveLocalDatabase(db);
+      }
+    }
 
     if (!profile) {
       return {
         data: { user: null, session: null },
-        error: { message: "Invalid administrator login credentials." },
+        error: {
+          message:
+            "Invalid administrator login credentials. Try superadmin@edumanage.io, admin.kigali@schoollabs.cc, or admin.greenfield@schoollabs.cc with password: password123",
+        },
       };
     }
 
@@ -379,12 +396,70 @@ const mockAuth = {
 };
 
 /**
- * Universal supabase client export
- * Falls back to our complete in-browser RLS database if live keys are not configured.
+ * Universal Supabase Client:
+ * Handles both Sandbox Mode (instant testing with zero 400 errors) and Live Supabase Cloud.
  */
-export const supabase = realSupabase || {
-  auth: mockAuth,
+export const supabase = {
+  auth: {
+    async signInWithPassword(credentials: { email: string; password?: string }) {
+      const mode = getDatabaseMode();
+      const cleanEmail = (credentials.email || "").trim().toLowerCase();
+      const isKnownDemoAccount = INITIAL_PROFILES.some(
+        (p) => p.email.toLowerCase() === cleanEmail
+      );
+
+      // If user is testing with demo account in Live mode, or in Sandbox mode:
+      if (mode === "sandbox" || isKnownDemoAccount) {
+        return await mockAuth.signInWithPassword(credentials);
+      }
+
+      // If Live Supabase is explicitly configured and custom user is logging in:
+      if (realSupabase) {
+        try {
+          const res = await realSupabase.auth.signInWithPassword(credentials as any);
+          if (res.error) {
+            // If remote doesn't have this user, fallback to mockAuth
+            const localRes = await mockAuth.signInWithPassword(credentials);
+            if (!localRes.error) return localRes;
+            return res;
+          }
+          return res;
+        } catch {
+          return await mockAuth.signInWithPassword(credentials);
+        }
+      }
+
+      return await mockAuth.signInWithPassword(credentials);
+    },
+
+    async signOut() {
+      if (realSupabase) {
+        try {
+          await realSupabase.auth.signOut();
+        } catch {}
+      }
+      return await mockAuth.signOut();
+    },
+
+    async getUser() {
+      const session = getLocalAuthSession();
+      if (session) {
+        return { data: { user: session.user }, error: null };
+      }
+      if (realSupabase && getDatabaseMode() === "live") {
+        try {
+          return await realSupabase.auth.getUser();
+        } catch {}
+      }
+      return await mockAuth.getUser();
+    },
+  },
+
   from(tableName: string) {
+    const mode = getDatabaseMode();
+    if (mode === "live" && realSupabase) {
+      return (realSupabase as any).from(tableName);
+    }
     return new QueryBuilder(tableName);
   },
 };

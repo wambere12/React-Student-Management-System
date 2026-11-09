@@ -19,6 +19,7 @@ import { getSchools } from "../services/schoolService";
 import { evaluateSystemChecklist } from "../services/testingChecklist";
 import { Profile, School } from "../types";
 import TestingChecklistModal from "../components/TestingChecklistModal";
+import { getDatabaseMode } from "../services/supabase";
 
 export default function AdminLayout() {
   const navigate = useNavigate();
@@ -302,7 +303,15 @@ export default function AdminLayout() {
           </div>
 
           {/* Zone 2: Navigation status & quick actions */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
+            <span
+              className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-mono rounded border bg-slate-50 border-slate-200 text-slate-600"
+              title="Database backend"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+              {getDatabaseMode() === "live" ? "Supabase Cloud" : "Sandbox RLS Engine"}
+            </span>
+
             <button
               onClick={() => setChecklistOpen(true)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 transition-colors"
